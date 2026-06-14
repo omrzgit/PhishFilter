@@ -28,3 +28,4 @@ A Python-based tool that analyzes suspicious emails to detect phishing attempts 
 - Security tool development
 
 ## Screenshots
+<img width="500" height="458" alt="Untitled" src="https://github.com/user-attachments/assets/53b1b664-ca4f-4b5b-ad67-e183217711d7" />
