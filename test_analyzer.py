@@ -6,7 +6,10 @@ from analyzer import (
     check_anchor_mismatches,
     analyze_sender,
     parse_email_message,
-    generate_report
+    generate_report,
+    check_url_heuristics,
+    check_openphish,
+    check_url
 )
 
 
@@ -89,6 +92,35 @@ Please verify your credentials immediately at http://verify-now.com.
         report = generate_report("http://bad.com", mock_data)
         self.assertEqual(report["verdict"], "MALICIOUS")
         self.assertEqual(report["malicious"], 3)
+
+    def test_heuristics_ip_host(self):
+        res = check_url_heuristics("http://192.168.1.100/login")
+        self.assertEqual(res["risk_level"], "SUSPICIOUS")
+        self.assertTrue(any("raw ip" in f.lower() for f in res["flags"]))
+
+    def test_heuristics_brand_impersonation(self):
+        res = check_url_heuristics("http://paypal-verification.com/login")
+        self.assertEqual(res["risk_level"], "MALICIOUS")
+        self.assertTrue(any("brand impersonation" in f.lower() for f in res["flags"]))
+
+    def test_heuristics_high_risk_tld(self):
+        res = check_url_heuristics("http://free-gift-card.xyz/claim")
+        self.assertIn(res["risk_level"], ["SUSPICIOUS", "MALICIOUS"])
+        self.assertTrue(any("top-level domain" in f.lower() for f in res["flags"]))
+
+    def test_openphish_feed_detection(self):
+        sample_feed = {"http://known-phish.com/login"}
+        hit = check_openphish("http://known-phish.com/login", custom_feed=sample_feed)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["risk_level"], "MALICIOUS")
+
+        miss = check_openphish("http://clean-site.org", custom_feed=sample_feed)
+        self.assertIsNone(miss)
+
+    def test_fallback_when_vt_unconfigured(self):
+        report = check_url("http://paypal-login-verify.com/signin", api_key=None, enable_fallback=True)
+        self.assertIsNotNone(report)
+        self.assertEqual(report["risk_level"], "MALICIOUS")
 
 
 if __name__ == "__main__":

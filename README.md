@@ -6,6 +6,7 @@ A Python-based tool that analyzes suspicious emails to detect phishing attempts 
 ## Tools & Technologies
 - Python 3
 - VirusTotal API (v3)
+- OpenPhish threat intelligence feed
 - Requests
 - Standard libraries: re, email, argparse
 
@@ -14,6 +15,7 @@ A Python-based tool that analyzes suspicious emails to detect phishing attempts 
 - Strips trailing punctuation from extracted URLs
 - Detects deceptive links (anchor text vs target URL mismatch)
 - Checks URLs against antivirus engines via VirusTotal API
+- Automatic fallback to OpenPhish feed and local heuristics if VirusTotal is unavailable
 - Analyzes sender domains for brand impersonation and display name spoofing
 - Parses .eml files, raw text, or single URLs via CLI flags
 - Generates structured threat reports with SAFE, SUSPICIOUS, or MALICIOUS verdicts
@@ -21,7 +23,7 @@ A Python-based tool that analyzes suspicious emails to detect phishing attempts 
 ## How It Works
 1. Provide email text, a .eml file, or a specific URL to the tool
 2. Tool extracts and normalizes all URLs using regex and HTML parsing
-3. Each URL is checked against VirusTotal threat intelligence
+3. Each URL is checked against VirusTotal or secondary threat intelligence feeds
 4. Sender identity is verified for spoofing and brand impersonation
 5. A full threat report is generated with clear verdicts
 

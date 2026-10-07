@@ -8,7 +8,8 @@ import os
 import re
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 import requests
 
 API_KEY = "API key"
@@ -67,6 +68,12 @@ SUSPICIOUS_DOMAIN_KEYWORDS = [
     "password",
     "wallet",
 ]
+
+HIGH_RISK_TLDS = {
+    "xyz", "top", "tk", "ml", "ga", "cf", "gq", "buzz", "cam", "work", "loan", "click", "rest", "fit", "surf"
+}
+
+_OPENPHISH_CACHE: Optional[Set[str]] = None
 
 
 def undefang_text(text: str) -> str:
@@ -138,11 +145,106 @@ def check_anchor_mismatches(email_text: str) -> List[Dict[str, str]]:
     return mismatches
 
 
-def check_url(url: str, api_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Check a URL against VirusTotal using cached report or async scanning."""
+def check_url_heuristics(url: str) -> Dict[str, Any]:
+    """Offline heuristic inspection of URL structure, hostname, and keywords."""
+    parsed = urlparse(url if "://" in url else f"http://{url}")
+    netloc = parsed.netloc.split(":")[0].lower()
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+
+    flags: List[str] = []
+    risk_level = "SAFE"
+
+    # 1. Raw IPv4 address check
+    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', netloc):
+        flags.append("Hostname is a raw IP address instead of a domain name")
+        risk_level = "SUSPICIOUS"
+
+    # 2. High-risk TLD check
+    tld = netloc.split(".")[-1] if "." in netloc else ""
+    if tld in HIGH_RISK_TLDS:
+        flags.append(f"High-abuse top-level domain detected (.{tld})")
+        if risk_level != "MALICIOUS":
+            risk_level = "SUSPICIOUS"
+
+    # 3. Brand impersonation in domain / subdomain
+    is_trusted_host = False
+    for legit in KNOWN_LEGITIMATE_DOMAINS:
+        if netloc == legit or netloc.endswith(f".{legit}"):
+            is_trusted_host = True
+            break
+
+    if not is_trusted_host:
+        for brand in BRAND_KEYWORDS:
+            if brand in netloc and not (netloc == f"{brand}.com" or netloc.endswith(f".{brand}.com")):
+                flags.append(f"Brand impersonation attempt in URL hostname ({brand})")
+                risk_level = "MALICIOUS"
+                break
+
+    # 4. Sensitive credential harvesting keywords in path or query
+    path_keywords = [
+        kw for kw in SUSPICIOUS_DOMAIN_KEYWORDS
+        if kw in path or kw in query
+    ]
+    if path_keywords and not is_trusted_host:
+        flags.append(f"Sensitive authentication/billing keywords in URL path: {path_keywords}")
+        if risk_level != "MALICIOUS":
+            risk_level = "SUSPICIOUS"
+
+    # 5. Excessive subdomains
+    domain_parts = netloc.split(".")
+    if len(domain_parts) >= 5:
+        flags.append(f"Excessive subdomain depth ({len(domain_parts)} levels)")
+        if risk_level == "SAFE":
+            risk_level = "SUSPICIOUS"
+
+    return {
+        "source": "Heuristic Analysis",
+        "url": url,
+        "risk_level": risk_level,
+        "flags": flags
+    }
+
+
+def fetch_openphish_feed() -> Set[str]:
+    """Fetch and cache community threat feed from OpenPhish."""
+    global _OPENPHISH_CACHE
+    if _OPENPHISH_CACHE is not None:
+        return _OPENPHISH_CACHE
+
+    _OPENPHISH_CACHE = set()
+    try:
+        resp = requests.get("https://openphish.com/feed.txt", timeout=5)
+        if resp.status_code == 200:
+            for line in resp.text.splitlines():
+                clean_line = line.strip().rstrip("/")
+                if clean_line:
+                    _OPENPHISH_CACHE.add(clean_line.lower())
+    except Exception:
+        pass
+
+    return _OPENPHISH_CACHE
+
+
+def check_openphish(url: str, custom_feed: Optional[Set[str]] = None) -> Optional[Dict[str, Any]]:
+    """Check if URL exists in OpenPhish active phishing feed."""
+    feed = custom_feed if custom_feed is not None else fetch_openphish_feed()
+    normalized_target = url.strip().rstrip("/").lower()
+
+    if normalized_target in feed:
+        return {
+            "source": "OpenPhish Threat Intelligence",
+            "url": url,
+            "risk_level": "MALICIOUS",
+            "flags": ["URL listed in active OpenPhish community threat feed"]
+        }
+    return None
+
+
+def check_virustotal(url: str, api_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Query VirusTotal API v3 for a given URL."""
     key = api_key or API_KEY
     if not key or key == "API key":
-        print(f"Notice: VirusTotal API key is not configured. Skipping live lookup for {url}")
         return None
 
     headers = {
@@ -166,7 +268,6 @@ def check_url(url: str, api_key: Optional[str] = None) -> Optional[Dict[str, Any
             }
             submit_resp = requests.post(post_endpoint, headers=post_headers, data={"url": url}, timeout=15)
             if submit_resp.status_code not in (200, 201):
-                print(f"VirusTotal submission error for {url}: HTTP {submit_resp.status_code}")
                 return None
 
             submit_data = submit_resp.json()
@@ -175,7 +276,7 @@ def check_url(url: str, api_key: Optional[str] = None) -> Optional[Dict[str, Any
                 return None
 
             analysis_endpoint = f"https://www.virustotal.com/api/v3/analyses/{analysis_id}"
-            for _ in range(4):
+            for _ in range(3):
                 time.sleep(2)
                 analysis_resp = requests.get(analysis_endpoint, headers=headers, timeout=15)
                 if analysis_resp.status_code == 200:
@@ -185,19 +286,32 @@ def check_url(url: str, api_key: Optional[str] = None) -> Optional[Dict[str, Any
                         return analysis_json
 
             return analysis_resp.json() if analysis_resp.status_code == 200 else None
-        elif response.status_code == 401:
-            print("VirusTotal Error: Invalid API key (HTTP 401).")
-            return None
-        elif response.status_code == 429:
-            print("VirusTotal Notice: Rate limit reached (HTTP 429). Free tier allows 4 requests/min.")
+        elif response.status_code in (401, 429):
             return None
         else:
-            print(f"VirusTotal Error: Received HTTP {response.status_code} for {url}")
             return None
 
-    except requests.RequestException as exc:
-        print(f"Network error while connecting to VirusTotal for {url}: {exc}")
+    except requests.RequestException:
         return None
+
+
+def check_url(url: str, api_key: Optional[str] = None, enable_fallback: bool = True) -> Optional[Dict[str, Any]]:
+    """Check URL against VirusTotal with automatic fallback to OpenPhish and local heuristics."""
+    vt_result = check_virustotal(url, api_key=api_key)
+    if vt_result is not None:
+        return vt_result
+
+    if not enable_fallback:
+        return None
+
+    # Fallback threat intelligence layer
+    openphish_result = check_openphish(url)
+    if openphish_result is not None:
+        return openphish_result
+
+    # Offline heuristic fallback layer
+    heuristic_result = check_url_heuristics(url)
+    return heuristic_result
 
 
 def generate_report(url: str, result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -206,28 +320,64 @@ def generate_report(url: str, result: Optional[Dict[str, Any]]) -> Dict[str, Any
     print(f"URL: {url}")
 
     if result is None:
-        print("Status: No VirusTotal intelligence available (API key omitted or request failed).")
+        print("Status: Threat intelligence unavailable.")
         print("VERDICT: UNKNOWN")
         print("=" * 50)
         return {"url": url, "verdict": "UNKNOWN", "malicious": 0, "suspicious": 0, "harmless": 0}
 
-    attributes = result.get("data", {}).get("attributes", {})
-    stats = attributes.get("last_analysis_stats") or attributes.get("stats") or {}
+    # Handle VirusTotal response format
+    if "data" in result:
+        attributes = result.get("data", {}).get("attributes", {})
+        stats = attributes.get("last_analysis_stats") or attributes.get("stats") or {}
 
-    malicious = stats.get("malicious", 0)
-    suspicious = stats.get("suspicious", 0)
-    harmless = stats.get("harmless", 0)
-    undetected = stats.get("undetected", 0)
+        malicious = stats.get("malicious", 0)
+        suspicious = stats.get("suspicious", 0)
+        harmless = stats.get("harmless", 0)
+        undetected = stats.get("undetected", 0)
 
-    print(f"Malicious engines:  {malicious}")
-    print(f"Suspicious engines: {suspicious}")
-    print(f"Harmless engines:   {harmless}")
-    print(f"Undetected engines: {undetected}")
+        print("Threat Source: VirusTotal API")
+        print(f"Malicious engines:  {malicious}")
+        print(f"Suspicious engines: {suspicious}")
+        print(f"Harmless engines:   {harmless}")
+        print(f"Undetected engines: {undetected}")
 
-    if malicious > 0:
+        if malicious > 0:
+            verdict = "MALICIOUS"
+            print("VERDICT: [MALICIOUS] - Do not click this URL!")
+        elif suspicious > 0:
+            verdict = "SUSPICIOUS"
+            print("VERDICT: [SUSPICIOUS] - Treat with caution!")
+        else:
+            verdict = "SAFE"
+            print("VERDICT: [SAFE]")
+
+        print("=" * 50)
+        return {
+            "source": "VirusTotal",
+            "url": url,
+            "verdict": verdict,
+            "malicious": malicious,
+            "suspicious": suspicious,
+            "harmless": harmless,
+            "undetected": undetected
+        }
+
+    # Handle OpenPhish / Heuristics fallback format
+    source = result.get("source", "Alternative Threat Intelligence")
+    risk_level = result.get("risk_level", "SAFE")
+    flags = result.get("flags", [])
+
+    print(f"Threat Source: {source} (Fallback)")
+    if flags:
+        for flag in flags:
+            print(f"Indicator: {flag}")
+    else:
+        print("Indicator: No threat indicators identified")
+
+    if risk_level == "MALICIOUS":
         verdict = "MALICIOUS"
         print("VERDICT: [MALICIOUS] - Do not click this URL!")
-    elif suspicious > 0:
+    elif risk_level == "SUSPICIOUS":
         verdict = "SUSPICIOUS"
         print("VERDICT: [SUSPICIOUS] - Treat with caution!")
     else:
@@ -236,12 +386,10 @@ def generate_report(url: str, result: Optional[Dict[str, Any]]) -> Dict[str, Any
 
     print("=" * 50)
     return {
+        "source": source,
         "url": url,
         "verdict": verdict,
-        "malicious": malicious,
-        "suspicious": suspicious,
-        "harmless": harmless,
-        "undetected": undetected
+        "flags": flags
     }
 
 
@@ -419,7 +567,7 @@ def analyze_full_email(
             print(f" - {u}")
 
         for u in urls:
-            result = check_url(u, api_key=api_key) if check_vt else None
+            result = check_url(u, api_key=api_key, enable_fallback=True) if check_vt else check_url_heuristics(u)
             rep = generate_report(u, result)
             url_reports.append(rep)
 
@@ -444,8 +592,8 @@ def main():
     parser.add_argument("-f", "--file", help="Path to email file (.eml or text file)")
     parser.add_argument("-t", "--text", help="Raw email text string to analyze")
     parser.add_argument("-s", "--sender", help="Sender email address to inspect")
-    parser.add_argument("-u", "--url", help="Single URL to inspect with VirusTotal")
-    parser.add_argument("--skip-vt", action="store_true", help="Skip VirusTotal network lookups")
+    parser.add_argument("-u", "--url", help="Single URL to inspect with threat intelligence")
+    parser.add_argument("--skip-vt", action="store_true", help="Skip VirusTotal and use fallback intelligence")
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
 
     args = parser.parse_args()
@@ -455,7 +603,7 @@ def main():
     print("=" * 50)
 
     if args.url:
-        result = check_url(args.url) if not args.skip_vt else None
+        result = check_url(args.url, enable_fallback=True) if not args.skip_vt else check_url_heuristics(args.url)
         report = generate_report(args.url, result)
         if args.json:
             print(json.dumps(report, indent=2))
@@ -507,7 +655,7 @@ def main():
             elif choice == "4":
                 u = input("Enter URL: ").strip()
                 if u:
-                    res = check_url(u) if not args.skip_vt else None
+                    res = check_url(u, enable_fallback=True) if not args.skip_vt else check_url_heuristics(u)
                     generate_report(u, res)
                 return
 
