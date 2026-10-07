@@ -1,25 +1,47 @@
 # Phishing Email Analyzer
 
 ## Overview
-A Python-based tool that analyzes suspicious emails to detect phishing attempts by extracting URLs and checking them against VirusTotal's threat intelligence database.
+A Python-based tool that analyzes suspicious emails to detect phishing attempts by extracting URLs, evaluating sender domains, and querying VirusTotal threat intelligence.
 
 ## Tools & Technologies
 - Python 3
-- VirusTotal API (free tier)
-- Regex (URL extraction)
+- VirusTotal API (v3)
+- Requests
+- Standard libraries: re, email, argparse
 
 ## Features
-- Extracts all URLs from email text automatically
-- Checks each URL against 70+ antivirus engines via VirusTotal API
-- Analyzes sender email domain for suspicious keywords
-- Generates a clear threat report with SAFE/SUSPICIOUS/MALICIOUS verdict
+- Extracts and un-defangs URLs from plain text and HTML emails
+- Strips trailing punctuation from extracted URLs
+- Detects deceptive links (anchor text vs target URL mismatch)
+- Checks URLs against antivirus engines via VirusTotal API
+- Analyzes sender domains for brand impersonation and display name spoofing
+- Parses .eml files, raw text, or single URLs via CLI flags
+- Generates structured threat reports with SAFE, SUSPICIOUS, or MALICIOUS verdicts
 
 ## How It Works
-1. Paste suspicious email text into the tool
-2. Tool extracts all URLs using regex pattern matching
-3. Each URL is submitted to VirusTotal for analysis
-4. Sender domain is checked against known phishing keywords
-5. A full threat report is generated with verdicts
+1. Provide email text, a .eml file, or a specific URL to the tool
+2. Tool extracts and normalizes all URLs using regex and HTML parsing
+3. Each URL is checked against VirusTotal threat intelligence
+4. Sender identity is verified for spoofing and brand impersonation
+5. A full threat report is generated with clear verdicts
+
+## Usage
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+Run interactive mode or sample analysis:
+```bash
+python analyzer.py
+```
+
+Command line options:
+```bash
+python analyzer.py --file email.eml
+python analyzer.py --url "http://suspicious-link.com"
+python analyzer.py --sender "support@secure-bank-verify.com"
+```
 
 ## Skills Demonstrated
 - Python scripting and API integration
